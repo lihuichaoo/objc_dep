@@ -100,6 +100,45 @@ def dependencies_in_project_with_file_extensions(path, exts, exclude, ignore, sy
 
     return d
 
+
+def classes_in_dir_with_file_extensions(paths, exts, exclude, ignore, extensions):
+    classes = Set()
+
+    regex_exclude = None
+    if exclude:
+        regex_exclude = re.compile(exclude)
+
+    for path in paths:
+        for root, dirs, files in os.walk(path):
+
+            if ignore:
+                for subfolder in ignore:
+                    if subfolder in dirs:
+                        dirs.remove(subfolder)
+
+            objc_files = []
+            for ext in exts:
+                objc_files += (f for f in files if f.endswith(ext))
+
+            for f in objc_files:
+                filename = f if extensions else os.path.splitext(f)[0]
+                if regex_exclude is not None and regex_exclude.search(filename):
+                    continue
+                else:
+                    classes.add(filename)
+
+    return classes
+
+
+def filter_dependecies_with_classes(d, classes):
+    filtered_d = {}
+    for a, l in d.iteritems():
+        common = l.intersection(classes)
+        if len(common) > 0:
+            filtered_d[a] = common
+    return filtered_d
+
+
 def two_ways_dependencies(d):
 
     two_ways = Set()
@@ -169,6 +208,7 @@ def print_frequencies_chart(d):
         s = "%2d | %s\n" % (i, ", ".join(sorted(list(l[i]))))
         sys.stderr.write(s)
 
+
 def dependencies_in_dot_format(path, exclude, ignore, system, extensions, root_class):
     
     d = dependencies_in_project_with_file_extensions(path, objc_extensions, exclude, ignore, system, extensions, root_class)
@@ -180,15 +220,41 @@ def dependencies_in_dot_format(path, exclude, ignore, system, extensions, root_c
 
     pch_set = dependencies_in_project(path, '.pch', exclude, ignore, system, extensions)
 
+    return dot_format(d, two_ways_set, untraversed_set, category_list, pch_set, ignore)
+
+
+def dependencies_on_special_paths_in_dot_format(path, depend_paths, exclude, ignore, system, extensions, root_class):
+
+    ignore_paths = []
+    for depend_path in depend_paths:
+        if depend_path.startswith(path):
+            ignore_paths.append(depend_path.split(os.sep)[-1])
+
+    all_ignore = ignore_paths if not ignore else ignore+ignore_paths
+
+    d = dependencies_in_project_with_file_extensions(path, objc_extensions, exclude, all_ignore, system, extensions, root_class)
+
+    classes = classes_in_dir_with_file_extensions(depend_paths, objc_extensions, exclude, ignore, extensions)
+    d = filter_dependecies_with_classes(d, classes)
+
+    two_ways_set = two_ways_dependencies(d)
+    untraversed_set = untraversed_files(d)
+
+    category_list, d = category_files(d)
+
+    pch_set = dependencies_in_project(path, '.pch', exclude, ignore, system, extensions)
+
+    return dot_format(d, two_ways_set, untraversed_set, category_list, pch_set, ignore)
+
+
+def dot_format(d, two_ways_set, untraversed_set, category_list, pch_set, ignore):
     #
-    
     sys.stderr.write("# number of imports\n\n")
     print_frequencies_chart(d)
-    
+
     sys.stderr.write("\n# times the class is imported\n\n")
-    d2 = referenced_classes_from_dict(d)    
+    d2 = referenced_classes_from_dict(d)
     print_frequencies_chart(d2)
-        
     #
 
     l = []
@@ -198,10 +264,10 @@ def dependencies_in_dot_format(path, exclude, ignore, system, extensions, root_c
     for k, deps in d.iteritems():
         if deps:
             deps.discard(k)
-        
+
         if len(deps) == 0:
             l.append("\t\"%s\" -> {};" % (k))
-        
+
         for k2 in deps:
             if not ((k, k2) in two_ways_set or (k2, k) in two_ways_set):
                 l.append("\t\"%s\" -> \"%s\";" % (k, k2))
@@ -211,7 +277,7 @@ def dependencies_in_dot_format(path, exclude, ignore, system, extensions, root_c
         l.append("\t\"%s\" [color=red];" % k)
         for x in v:
             l.append("\t\"%s\" -> \"%s\" [color=red];" % (k, x))
-    
+
     l.append("\t")
     l.append("\tedge [color=blue, dir=both];")
 
@@ -220,7 +286,7 @@ def dependencies_in_dot_format(path, exclude, ignore, system, extensions, root_c
 
     for k in untraversed_set:
         l.append("\t\"%s\" [color=gray, style=dashed, fontcolor=gray]" % k)
-    
+
     if category_list:
         l.append("\t")
         l.append("\tedge [color=black];")
@@ -235,6 +301,7 @@ def dependencies_in_dot_format(path, exclude, ignore, system, extensions, root_c
     l.append("}\n")
     return '\n'.join(l)
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-x", "--exclude", nargs='?', default='' ,help="regular expression of substrings to exclude from module names")
@@ -243,11 +310,15 @@ def main():
     parser.add_argument("-e", "--extensions", action='store_true', default=False, help="print file extensions")
     parser.add_argument("-r", "--root", default='', help="Class to use as root of dependency graph")
     parser.add_argument("-t", "--test", action='store_true', default=False, help="Exit with a success status of 0 if no two-way dependencies exist or failure otherwise, instead of outputting a graph")
+    parser.add_argument("-dps", "--depend_paths", nargs='*', default='', help="list of path to get the dependent classes")
     parser.add_argument("project_path", help="path to folder hierarchy containing Objective-C files")
     args= parser.parse_args()
 
     if not args.test:
-        print dependencies_in_dot_format(args.project_path, args.exclude, args.ignore, args.system, args.extensions, args.root)
+        if not args.depend_paths:
+            print dependencies_in_dot_format(args.project_path, args.exclude, args.ignore, args.system, args.extensions, args.root)
+        else:
+            print dependencies_on_special_paths_in_dot_format(args.project_path, args.depend_paths, args.exclude, args.ignore, args.system, args.extensions, args.root)
     else:
         # Test if two-way dependencies exist. If none do, then exit on success (0), otherwise exit on failure (1)
         d = dependencies_in_project_with_file_extensions(args.project_path, objc_extensions, args.exclude, args.ignore, args.system, args.extensions, args.root)
